@@ -171,6 +171,9 @@ const SERVICES: readonly {
 
 // ── volumes ─────────────────────────────────────────────────────────────────
 const N_CUSTOMERS = 60;
+/** Acquisition cohorts, so "new customers (last 30d)" and its % delta are both non-zero. */
+const N_CUSTOMERS_LAST_30D = 15;
+const N_CUSTOMERS_PRIOR_30D = 10;
 const N_VEHICLES = 90; // 30 customers own a second car
 const N_MECHANICS = 25;
 const N_BOOKINGS = 650;
@@ -214,24 +217,44 @@ const EVENT_NOTES: Partial<Record<BookingStatus, readonly string[]>> = {
 
 const day = 86_400_000;
 
+/** Relative busyness of each weekday. 0 = Sunday. */
+const DAY_WEIGHT = [0.3, 1, 1, 1, 1, 1, 0.55] as const;
+
+/**
+ * Cumulative weight table over the last DAYS_BACK days, built once.
+ *
+ * This exists so that picking a date consumes a FIXED number of PRNG draws. The obvious
+ * implementation — sample a day, reject it with probability (1 - weight), repeat — burns a
+ * variable number of draws depending on which weekday you happen to run the seed on. That
+ * shifts every subsequent draw and silently changes every amount in the dataset, which is
+ * exactly the reproducibility the fixed seed is supposed to buy.
+ */
+function buildDayTable(now: number): { cumulative: number[]; total: number } {
+  const cumulative: number[] = [];
+  let total = 0;
+  for (let daysAgo = 0; daysAgo < DAYS_BACK; daysAgo++) {
+    const dow = new Date(now - daysAgo * day).getDay();
+    total += DAY_WEIGHT[dow] ?? 1;
+    cumulative.push(total);
+  }
+  return { cumulative, total };
+}
+
 /**
  * Picks a createdAt within the window, weighted so weekdays are busier than weekends —
  * a flat distribution is the giveaway that a dataset is synthetic.
+ * Consumes exactly four draws: one for the day, three for the time of day.
  */
-function weekdayWeightedDate(now: number): Date {
-  for (let attempt = 0; attempt < 40; attempt++) {
-    const daysAgo = rand() * DAYS_BACK;
-    const ts = now - daysAgo * day;
-    const dow = new Date(ts).getDay(); // 0 Sun … 6 Sat
-    const weight = dow === 0 ? 0.3 : dow === 6 ? 0.55 : 1;
-    if (rand() <= weight) {
-      // Cluster inside working hours rather than uniformly across midnight.
-      const d = new Date(ts);
-      d.setHours(int(8, 19), int(0, 59), int(0, 59), 0);
-      return d;
-    }
-  }
-  return new Date(now - rand() * DAYS_BACK * day);
+function weekdayWeightedDate(now: number, table: { cumulative: number[]; total: number }): Date {
+  const target = rand() * table.total;
+  // Linear scan over at most 90 entries — a binary search would save nothing measurable.
+  let daysAgo = table.cumulative.findIndex((c) => c >= target);
+  if (daysAgo < 0) daysAgo = DAYS_BACK - 1;
+
+  const d = new Date(now - daysAgo * day);
+  // Cluster inside working hours rather than uniformly across midnight.
+  d.setHours(int(8, 19), int(0, 59), int(0, 59), 0);
+  return d;
 }
 
 async function truncateAll(): Promise<void> {
@@ -295,13 +318,25 @@ async function main(): Promise<void> {
     const place = pick(CITIES);
     const id = `seed_cus_${pad(i + 1)}`;
     rtoByCustomer.set(id, place.rto);
+
+    // Acquisition cohorts, assigned by index so the split is exact rather than sampled.
+    // Previously every customer was 90-500 days old, which made the dashboard's
+    // "new customers (last 30d)" card read 0 forever — a correct query over data that
+    // could not produce a non-zero answer.
+    const daysAgo =
+      i < N_CUSTOMERS_LAST_30D
+        ? int(0, 29) // signed up this month
+        : i < N_CUSTOMERS_LAST_30D + N_CUSTOMERS_PRIOR_30D
+          ? int(30, 59) // the month before, so the % delta has a baseline
+          : int(60, 500); // the long tail of existing customers
+
     return {
       id,
       name: `${first} ${last}`,
       email: `${first.toLowerCase()}.${last.toLowerCase()}${pad(i + 1)}@gmail.com`,
       phone: `+91${pick(['98', '97', '99', '81', '73'] as const)}${int(10000000, 99999999)}`,
       city: place.city,
-      createdAt: new Date(now - int(DAYS_BACK, 500) * day),
+      createdAt: new Date(now - daysAgo * day),
     };
   });
   await prisma.customer.createMany({ data: customers });
@@ -381,8 +416,17 @@ async function main(): Promise<void> {
   const completedByMechanic = new Map<string, number>();
   let eventNo = 0;
 
+  // Customer sign-up date, so a booking is never attributed to someone who had not yet
+  // registered. Now that 15 customers are less than a month old, picking a vehicle blindly
+  // would place 90-day-old bookings against week-old customers — another state that cannot exist.
+  const customerCreatedAt = new Map(customers.map((c) => [c.id, c.createdAt.getTime()]));
+
   const makeBooking = (index: number, status: BookingStatus, createdAt: Date): void => {
-    const vehicle = pick(vehicles);
+    const eligible = vehicles.filter(
+      (v) => (customerCreatedAt.get(v.customerId) ?? 0) <= createdAt.getTime(),
+    );
+    // One draw either way, so the PRNG stream stays fixed-length per booking.
+    const vehicle = pick(eligible.length > 0 ? eligible : vehicles);
     const service = pick(services);
 
     // A PENDING booking has no mechanic yet — that IS the dispatch queue. Everything past
@@ -448,7 +492,8 @@ async function main(): Promise<void> {
     }
   };
 
-  pool.forEach((status, i) => makeBooking(i, status, weekdayWeightedDate(now)));
+  const dayTable = buildDayTable(now);
+  pool.forEach((status, i) => makeBooking(i, status, weekdayWeightedDate(now, dayTable)));
   todayStatuses.forEach((status, i) => {
     const today = new Date(now);
     today.setHours(int(7, Math.max(8, new Date(now).getHours())), int(0, 59), int(0, 59), 0);

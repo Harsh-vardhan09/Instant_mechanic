@@ -3,16 +3,22 @@ import type { BookingStatus } from '@prisma/client';
 import { createApp } from '../app.js';
 import { env } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
-import { emitBookingUpdate, emitStatsUpdate, initIo } from '../realtime/io.js';
+import { initIo } from '../realtime/io.js';
+import * as bookingsService from '../modules/bookings/bookings.service.js';
 
 /**
  * Live-traffic simulator for demos: advances real bookings through their lifecycle every few
- * seconds, writes the audit row, and pushes the change to connected dashboards.
+ * seconds and pushes each change to connected dashboards.
  *
- * It boots the SAME express app and socket.io server as `npm run dev` and then runs the loop
+ * It boots the SAME express app and socket.io server as `npm run dev` and runs the loop
  * in-process. That is deliberate: socket.io holds its connections in memory, so a separate
  * process has no way to push to clients attached to the API without a shared message bus.
  * Run this INSTEAD of `npm run dev` during a demo — REST and websockets both work here.
+ *
+ * Every transition goes through bookingsService, exactly like an operator clicking the button:
+ * same state machine, same transaction, same audit row, same cache invalidation, same events.
+ * A simulator with its own private copy of the rules eventually disagrees with the API, and
+ * then it is demonstrating something the product does not do.
  *
  * ponytail: single process, no broker. If the simulator ever needs to run alongside a
  * separately deployed API, add @socket.io/redis-adapter and emit through Redis instead.
@@ -21,59 +27,11 @@ import { emitBookingUpdate, emitStatsUpdate, initIo } from '../realtime/io.js';
 const TICK_MS = 4_000;
 const NEW_BOOKING_CHANCE = 0.05;
 
-/** The only legal forward transitions. A booking may not skip a step or move backwards. */
-const NEXT: Partial<Record<BookingStatus, BookingStatus>> = {
-  PENDING: 'ASSIGNED',
-  ASSIGNED: 'ON_THE_WAY',
-  ON_THE_WAY: 'IN_PROGRESS',
-  IN_PROGRESS: 'COMPLETED',
-};
-
 /** COMPLETED and CANCELLED are terminal — nothing advances out of them. */
 const NON_TERMINAL: BookingStatus[] = ['PENDING', 'ASSIGNED', 'ON_THE_WAY', 'IN_PROGRESS'];
 
-const NOTES: Record<string, string> = {
-  ASSIGNED: 'Mechanic assigned by ops',
-  ON_THE_WAY: 'Mechanic en route',
-  IN_PROGRESS: 'Work started',
-  COMPLETED: 'Job completed, invoice raised',
-};
-
 const ts = (): string => new Date().toLocaleTimeString('en-GB');
 const rand = (n: number): number => Math.floor(Math.random() * n);
-
-/** Current dashboard headline figures, aggregated in SQL over the full set — never a page. */
-async function currentStats(): Promise<{
-  totalBookings: number;
-  activeBookings: number;
-  availableMechanics: number;
-  revenueToday: string;
-}> {
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-
-  const [totalBookings, activeBookings, availableMechanics, revenue] = await Promise.all([
-    prisma.booking.count(),
-    prisma.booking.count({ where: { status: { in: NON_TERMINAL } } }),
-    prisma.mechanic.count({ where: { status: 'AVAILABLE' } }),
-    prisma.booking.aggregate({
-      where: { status: 'COMPLETED', completedAt: { gte: startOfToday } },
-      _sum: { amount: true },
-    }),
-  ]);
-
-  return {
-    totalBookings,
-    activeBookings,
-    availableMechanics,
-    revenueToday: revenue._sum.amount?.toString() ?? '0',
-  };
-}
-
-async function broadcastStats(): Promise<void> {
-  const stats = await currentStats();
-  emitStatsUpdate({ ...stats, generatedAt: new Date().toISOString() });
-}
 
 /** Advances one random in-flight booking by exactly one legal step. */
 async function advanceOne(): Promise<boolean> {
@@ -87,17 +45,11 @@ async function advanceOne(): Promise<boolean> {
     where: { status: { in: NON_TERMINAL } },
     skip: rand(total),
     take: 1,
-    include: { service: { select: { durationMins: true } } },
   });
   if (!booking) return false;
 
-  const from = booking.status;
-  const to = NEXT[from];
-  if (!to) return false;
-
-  // Moving out of PENDING means someone must actually be dispatched.
-  let mechanicId = booking.mechanicId;
-  if (to === 'ASSIGNED' && !mechanicId) {
+  // PENDING leaves the queue only by dispatching someone, which is the assign endpoint's job.
+  if (booking.status === 'PENDING') {
     const free = await prisma.mechanic.count({ where: { status: 'AVAILABLE' } });
     const [mechanic] = free
       ? await prisma.mechanic.findMany({
@@ -106,55 +58,27 @@ async function advanceOne(): Promise<boolean> {
           take: 1,
         })
       : await prisma.mechanic.findMany({ take: 1 });
-    mechanicId = mechanic?.id ?? null;
-    if (!mechanicId) {
+    if (!mechanic) {
       console.log(`[${ts()}] no mechanics exist — run "npm run db:seed" first`);
       return false;
     }
+    const result = await bookingsService.assignMechanic(
+      booking.id,
+      { mechanicId: mechanic.id, note: 'Auto-dispatched by simulator' },
+      null,
+    );
+    console.log(
+      `[${ts()}] ${booking.code}  PENDING -> ASSIGNED  (${mechanic.name})${result.idempotent ? ' [no-op]' : ''}`,
+    );
+    return !result.idempotent;
   }
 
-  const completedAt = to === 'COMPLETED' ? new Date() : null;
+  // Ask the state machine what comes next rather than keeping a second copy of the rules.
+  const next = bookingsService.TRANSITIONS[booking.status].find((s) => s !== 'CANCELLED');
+  if (!next) return false;
 
-  // One transaction: the booking row, its audit row, and the mechanic's counter move together
-  // or not at all. A half-applied transition is exactly the inconsistency the audit trail exists
-  // to rule out.
-  const updated = await prisma.$transaction(async (tx) => {
-    const b = await tx.booking.update({
-      where: { id: booking.id },
-      data: { status: to, mechanicId, ...(completedAt ? { completedAt } : {}) },
-    });
-
-    await tx.bookingEvent.create({
-      data: {
-        bookingId: booking.id,
-        fromStatus: from,
-        toStatus: to,
-        actorId: null,
-        note: NOTES[to] ?? null,
-      },
-    });
-
-    // Keep the denormalised counter honest, the same way the seed does.
-    if (to === 'COMPLETED' && mechanicId) {
-      await tx.mechanic.update({
-        where: { id: mechanicId },
-        data: { jobsCompleted: { increment: 1 }, status: 'AVAILABLE' },
-      });
-    } else if (to === 'ON_THE_WAY' && mechanicId) {
-      await tx.mechanic.update({ where: { id: mechanicId }, data: { status: 'ON_JOB' } });
-    }
-    return b;
-  });
-
-  emitBookingUpdate({
-    bookingId: updated.id,
-    code: updated.code,
-    status: updated.status,
-    mechanicId: updated.mechanicId,
-    updatedAt: updated.updatedAt.toISOString(),
-  });
-
-  console.log(`[${ts()}] ${updated.code}  ${from} -> ${to}`);
+  await bookingsService.changeStatus(booking.id, { status: next, note: 'Simulated' }, null);
+  console.log(`[${ts()}] ${booking.code}  ${booking.status} -> ${next}`);
   return true;
 }
 
@@ -173,49 +97,26 @@ async function createBooking(): Promise<boolean> {
   const [service] = await prisma.service.findMany({ skip: rand(serviceCount), take: 1 });
   if (!vehicle || !service) return false;
 
-  // Continue the BK-##### sequence rather than colliding with the seeded range.
-  const rows = await prisma.$queryRaw<{ max: number | null }[]>`
-    SELECT MAX(CAST(SUBSTRING(code FROM 4) AS INTEGER)) AS max
-    FROM bookings WHERE code ~ '^BK-[0-9]+$'`;
-  const code = `BK-${(rows[0]?.max ?? 10000) + 1}`;
+  const booking = await bookingsService.create(
+    {
+      customerId: vehicle.customerId,
+      vehicleId: vehicle.id,
+      serviceId: service.id,
+      scheduledAt: new Date(Date.now() + (1 + rand(48)) * 3_600_000),
+      amount: Number((Number(service.basePrice) * (0.85 + Math.random() * 0.5)).toFixed(2)),
+      note: 'Created by simulator',
+    },
+    null,
+  );
 
-  const amount = (Number(service.basePrice) * (0.85 + Math.random() * 0.5)).toFixed(2);
-
-  const created = await prisma.$transaction(async (tx) => {
-    const b = await tx.booking.create({
-      data: {
-        code,
-        customerId: vehicle.customerId,
-        vehicleId: vehicle.id,
-        serviceId: service.id,
-        mechanicId: null,
-        status: 'PENDING',
-        amount,
-        scheduledAt: new Date(Date.now() + (1 + rand(48)) * 3_600_000),
-      },
-    });
-    await tx.bookingEvent.create({
-      data: { bookingId: b.id, fromStatus: null, toStatus: 'PENDING', note: 'Booking created' },
-    });
-    return b;
-  });
-
-  emitBookingUpdate({
-    bookingId: created.id,
-    code: created.code,
-    status: created.status,
-    mechanicId: null,
-    updatedAt: created.updatedAt.toISOString(),
-  });
-
-  console.log(`[${ts()}] ${created.code}  NEW booking -> PENDING  (${service.name})`);
+  console.log(`[${ts()}] ${booking.code}  NEW booking -> PENDING  (${service.name})`);
   return true;
 }
 
 async function tick(): Promise<void> {
   try {
-    const changed = Math.random() < NEW_BOOKING_CHANCE ? await createBooking() : await advanceOne();
-    if (changed) await broadcastStats();
+    if (Math.random() < NEW_BOOKING_CHANCE) await createBooking();
+    else await advanceOne();
   } catch (err) {
     // A simulator that dies on the first blip is useless during a demo — log and keep going.
     console.error(`[${ts()}] tick failed:`, err instanceof Error ? err.message : err);
@@ -246,7 +147,6 @@ httpServer.listen(env.PORT, () => {
 });
 
 const timer = setInterval(() => void tick(), TICK_MS);
-void broadcastStats();
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {

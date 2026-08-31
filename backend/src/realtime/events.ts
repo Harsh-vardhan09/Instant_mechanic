@@ -4,8 +4,8 @@
  * the classic way a live dashboard goes quietly stale.
  */
 export const SOCKET_EVENTS = {
-  BOOKING_UPDATE: 'booking:update',
-  STATS_UPDATE: 'stats:update',
+  BOOKING_UPDATED: 'booking:updated',
+  STATS_UPDATED: 'stats:updated',
 } as const;
 
 export type SocketEventName = (typeof SOCKET_EVENTS)[keyof typeof SOCKET_EVENTS];
@@ -15,12 +15,24 @@ export const SOCKET_ROOMS = {
   DASHBOARD: 'dashboard',
 } as const;
 
+/**
+ * The full booking row, matching what GET /api/bookings returns for a single item.
+ * Sending the whole row rather than an id spares every connected dashboard a refetch —
+ * one write would otherwise fan out into one HTTP request per open browser tab.
+ */
 export interface BookingUpdatePayload {
-  bookingId: string;
+  id: string;
   code: string;
   status: string;
-  mechanicId: string | null;
+  amount: string;
+  scheduledAt: string;
+  completedAt: string | null;
+  createdAt: string;
   updatedAt: string;
+  customer: { id: string; name: string; phone: string; city: string } | null;
+  vehicle: { id: string; make: string; model: string; regNumber: string } | null;
+  service: { id: string; name: string; category: string } | null;
+  mechanic: { id: string; name: string; status: string } | null;
 }
 
 export interface StatsUpdatePayload {
@@ -33,8 +45,8 @@ export interface StatsUpdatePayload {
 
 /** Server → client events. Keys must match SOCKET_EVENTS values. */
 export interface ServerToClientEvents {
-  'booking:update': (payload: BookingUpdatePayload) => void;
-  'stats:update': (payload: StatsUpdatePayload) => void;
+  'booking:updated': (payload: BookingUpdatePayload) => void;
+  'stats:updated': (payload: StatsUpdatePayload) => void;
 }
 
 export interface ClientToServerEvents {

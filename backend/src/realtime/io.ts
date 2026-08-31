@@ -78,11 +78,11 @@ function requireIo(): Io {
 }
 
 export function emitBookingUpdate(payload: BookingUpdatePayload): void {
-  requireIo().to(SOCKET_ROOMS.DASHBOARD).emit(SOCKET_EVENTS.BOOKING_UPDATE, payload);
+  requireIo().to(SOCKET_ROOMS.DASHBOARD).emit(SOCKET_EVENTS.BOOKING_UPDATED, payload);
 }
 
 export function emitStatsUpdate(payload: StatsUpdatePayload): void {
-  requireIo().to(SOCKET_ROOMS.DASHBOARD).emit(SOCKET_EVENTS.STATS_UPDATE, payload);
+  requireIo().to(SOCKET_ROOMS.DASHBOARD).emit(SOCKET_EVENTS.STATS_UPDATED, payload);
 }
 
 export async function closeIo(): Promise<void> {

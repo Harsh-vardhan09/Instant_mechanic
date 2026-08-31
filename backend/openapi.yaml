@@ -1,0 +1,874 @@
+openapi: 3.0.3
+info:
+  title: instant-mechanic Operations API
+  version: 1.0.0
+  description: |
+    Internal operations API for the Instant Mechanic dashboard: vehicle-service bookings,
+    mechanics, customers and revenue analytics.
+
+    ## Conventions
+
+    - **Authentication.** Every route except `GET /api/health`, `POST /api/auth/login` and
+      `/api/docs` requires `Authorization: Bearer <jwt>`. Tokens last 7 days.
+    - **List envelope.** Every list endpoint accepts `page`, `limit`, `sort`, `order`, `search`
+      and returns `{ data, meta: { page, limit, total, totalPages } }`. `total` is a COUNT over
+      the full filtered set, not the length of the page.
+    - **Sorting.** `sort` is checked against a per-endpoint allowlist. An unknown column is a
+      400, never interpolated into the query.
+    - **Money.** All monetary values are **decimal strings** (`"4250.00"`), never JSON numbers.
+      Floats lose cents at scale and these figures drive business decisions.
+    - **Revenue counts COMPLETED bookings only.** CANCELLED bookings count toward booking
+      totals but never contribute to revenue or `totalSpent`.
+    - **Errors** are `{ error: { code, message, details? } }`. Stack traces are returned only
+      when `NODE_ENV !== production`.
+servers:
+  - url: http://localhost:8000
+    description: Local development
+tags:
+  - name: Auth
+  - name: Dashboard
+  - name: Analytics
+  - name: Bookings
+  - name: Mechanics
+  - name: Customers
+  - name: Health
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Liveness and database probe
+      description: Pings the database with `SELECT 1` under a 2s timeout. Returns 503 when the database is unreachable so load balancers react instead of seeing a green 200.
+      security: []
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: Database unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange credentials for a JWT
+      description: Rate limited to 5 failed attempts per 15 minutes per IP. Unknown email and wrong password return an identical response — the endpoint is not an account-enumeration oracle.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, example: ops@instantmechanic.com }
+                password: { type: string, format: password, example: Password123! }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+                      token: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an operator account (ADMIN only)
+      description: Guarded by `requireRole('ADMIN')` server-side. The first admin is created out of band by `npm run db:seed`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 12 }
+                name: { type: string }
+                role: { type: string, enum: [ADMIN, OPS], default: OPS }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: The current operator, resolved from the JWT subject
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: End the session
+      description: JWTs are stateless, so this is advisory — the client discards the token. A stolen token stays valid until it expires.
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/dashboard:
+    get:
+      tags: [Dashboard]
+      summary: The overview card set in one response
+      description: |
+        Every figure is aggregated in SQL over the full table. Cached in memory for 30 seconds
+        and invalidated immediately on any booking write, so your own action is never stale.
+
+        `changes` holds the percent delta against the previous equivalent window (30 days, or
+        yesterday for `todayBookings`). A field is `null` when there is no honest baseline:
+        `activeMechanics` is a point-in-time gauge with no history, and a zero baseline makes
+        growth undefined rather than 100%.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Dashboard' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/analytics/bookings-over-time:
+    get:
+      tags: [Analytics]
+      summary: Bookings per day, zero-filled
+      description: Missing days are returned explicitly as `0`. Left as gaps, a chart library draws a straight line across a dead day, which reads as business-as-usual.
+      parameters:
+        - {
+            name: range,
+            in: query,
+            schema: { type: string, enum: ['7d', '30d', '90d'], default: '30d' },
+          }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string, example: '2026-09-01' }
+                        count: { type: integer, example: 27 }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/analytics/revenue-over-time:
+    get:
+      tags: [Analytics]
+      summary: Revenue per day, zero-filled
+      description: COMPLETED bookings only, keyed on `completedAt`.
+      parameters:
+        - {
+            name: range,
+            in: query,
+            schema: { type: string, enum: ['7d', '30d', '90d'], default: '30d' },
+          }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string, example: '2026-09-01' }
+                        revenue: { type: string, example: '19704.97' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/analytics/status-breakdown:
+    get:
+      tags: [Analytics]
+      summary: Booking counts and share by status
+      description: Percentage comes from a SQL window function, so the denominator is the whole table.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        status: { $ref: '#/components/schemas/BookingStatus' }
+                        count: { type: integer }
+                        percentage: { type: number, example: 55.1 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/analytics/service-breakdown:
+    get:
+      tags: [Analytics]
+      summary: Bookings and revenue by service category
+      description: '`count` includes cancelled bookings — they happened. `revenue` counts COMPLETED only. The two columns deliberately disagree.'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        category: { $ref: '#/components/schemas/ServiceCategory' }
+                        count: { type: integer }
+                        revenue: { type: string, example: '777368.46' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/bookings:
+    get:
+      tags: [Bookings]
+      summary: List bookings
+      description: '`search` matches booking code, customer name and vehicle registration, case-insensitively.'
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 },
+          }
+        - name: sort
+          in: query
+          description: Allowlisted. Anything else is a 400.
+          schema:
+            { type: string, enum: [createdAt, scheduledAt, amount, status], default: createdAt }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+        - { name: search, in: query, schema: { type: string }, example: BK-10001 }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/BookingStatus' } }
+        - { name: mechanicId, in: query, schema: { type: string } }
+        - {
+            name: serviceCategory,
+            in: query,
+            schema: { $ref: '#/components/schemas/ServiceCategory' },
+          }
+        - { name: dateFrom, in: query, schema: { type: string, format: date-time } }
+        - { name: dateTo, in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Booking' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Bookings]
+      summary: Create a booking
+      description: Always created in `PENDING` with a generated `BK-#####` code. `amount` defaults to the service base price.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customerId, vehicleId, serviceId, scheduledAt]
+              properties:
+                customerId: { type: string }
+                vehicleId: { type: string, description: Must belong to customerId }
+                serviceId: { type: string }
+                scheduledAt: { type: string, format: date-time }
+                amount: { type: number, description: Optional override of the service base price }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/bookings/{id}:
+    get:
+      tags: [Bookings]
+      summary: One booking with its full audit timeline
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    allOf:
+                      - $ref: '#/components/schemas/Booking'
+                      - type: object
+                        properties:
+                          timeline:
+                            type: array
+                            items: { $ref: '#/components/schemas/BookingEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/bookings/{id}/status:
+    patch:
+      tags: [Bookings]
+      summary: Move a booking along the state machine
+      description: |
+        Legal transitions, and nothing else:
+
+        | From | To |
+        |---|---|
+        | PENDING | ASSIGNED, CANCELLED |
+        | ASSIGNED | ON_THE_WAY, CANCELLED |
+        | ON_THE_WAY | IN_PROGRESS, CANCELLED |
+        | IN_PROGRESS | COMPLETED, CANCELLED |
+        | COMPLETED | terminal |
+        | CANCELLED | terminal |
+
+        An illegal transition returns **409** naming the current status and the legal next
+        ones. In one transaction this updates the booking, appends a `BookingEvent`, adjusts
+        the mechanic's status and `jobsCompleted`, invalidates the dashboard cache and emits
+        `booking:updated` and `stats:updated`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/BookingStatus' }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Illegal transition
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                error:
+                  code: CONFLICT
+                  message: 'Cannot change status from PENDING to COMPLETED. Allowed from PENDING: ASSIGNED, CANCELLED'
+
+  /api/bookings/{id}/assign:
+    patch:
+      tags: [Bookings]
+      summary: Dispatch a mechanic (idempotent)
+      description: |
+        Assigning the same mechanic to the same booking twice results in **one** assignment and
+        **one** audit row. This is enforced by a unique index on `(bookingId, mechanicId)` plus a
+        transaction — not an application-level check, which races: two clicks 20ms apart both
+        read "unassigned", both write, and two mechanics drive to one job.
+
+        The repeat call returns **200** with `idempotent: true` and writes nothing. Assigning a
+        *different* mechanic to an already-assigned booking is **409**.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mechanicId]
+              properties:
+                mechanicId: { type: string }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Assigned, or already assigned to this mechanic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Booking' }
+                  idempotent:
+                    type: boolean
+                    description: true when this exact assignment already existed and nothing was written
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/mechanics:
+    get:
+      tags: [Mechanics]
+      summary: List mechanics
+      description: Each row carries `jobsCompleted` and the mechanic's current booking, or their most recent one if idle. Resolved for the whole page in a single `DISTINCT ON` query — no N+1.
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 },
+          }
+        - {
+            name: sort,
+            in: query,
+            schema:
+              {
+                type: string,
+                enum: [name, rating, jobsCompleted, createdAt, status],
+                default: name,
+              },
+          }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: asc } }
+        - {
+            name: search,
+            in: query,
+            description: Matches name,
+            email or phone,
+            schema: { type: string },
+          }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/MechanicStatus' } }
+        - { name: specialisation, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Mechanic' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/mechanics/{id}:
+    get:
+      tags: [Mechanics]
+      summary: Mechanic detail with recent bookings
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Mechanic' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/mechanics/{id}/status:
+    patch:
+      tags: [Mechanics]
+      summary: Set availability
+      description: Going `OFF_DUTY` with live bookings is refused with 409 — it would leave those jobs dispatched to nobody.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/MechanicStatus' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Mechanic' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/customers:
+    get:
+      tags: [Customers]
+      summary: List customers
+      description: "`bookingCount` and `totalSpent` are aggregated in SQL over each customer's full history. `totalSpent` counts COMPLETED bookings only."
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 },
+          }
+        - {
+            name: sort,
+            in: query,
+            schema:
+              {
+                type: string,
+                enum: [name, createdAt, bookingCount, totalSpent, city],
+                default: createdAt,
+              },
+          }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+        - {
+            name: search,
+            in: query,
+            description: Matches name,
+            email or phone,
+            schema: { type: string },
+          }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Customer' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/customers/{id}:
+    get:
+      tags: [Customers]
+      summary: Customer detail with vehicles and booking history
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Customer' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    ValidationError:
+      description: Request failed zod validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Request validation failed
+              details: [{ path: sort, message: 'Invalid option' }]
+    Unauthorized:
+      description: Missing, malformed or expired token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: UNAUTHORIZED, message: Authentication required } }
+    Forbidden:
+      description: Authenticated but not permitted (role check runs server-side)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: FORBIDDEN, message: Not permitted } }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: NOT_FOUND, message: Resource not found } }
+    Conflict:
+      description: The request conflicts with current state
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: CONFLICT, message: Resource already exists } }
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            { error: { code: TOO_MANY_REQUESTS, message: Too many attempts, try again later } }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { description: Present on validation failures }
+            stack: { type: string, description: Development only; never returned in production }
+
+    PageMeta:
+      type: object
+      description: '`total` is a COUNT over the full filtered set, not the length of `data`.'
+      properties:
+        page: { type: integer, example: 1 }
+        limit: { type: integer, example: 20 }
+        total: { type: integer, example: 650 }
+        totalPages: { type: integer, example: 33 }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        uptime: { type: integer, description: Seconds since process start }
+        db: { type: string, enum: [up, down] }
+        timestamp: { type: string, format: date-time }
+
+    User:
+      type: object
+      description: passwordHash is absent by construction — the service never returns it.
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { type: string, enum: [ADMIN, OPS] }
+        createdAt: { type: string, format: date-time }
+
+    BookingStatus:
+      type: string
+      enum: [PENDING, ASSIGNED, ON_THE_WAY, IN_PROGRESS, COMPLETED, CANCELLED]
+
+    ServiceCategory:
+      type: string
+      enum: [MAINTENANCE, REPAIR, DIAGNOSTIC, EMERGENCY, INSPECTION]
+
+    MechanicStatus:
+      type: string
+      enum: [AVAILABLE, ON_JOB, OFF_DUTY]
+
+    Booking:
+      type: object
+      properties:
+        id: { type: string }
+        code: { type: string, example: BK-10001 }
+        status: { $ref: '#/components/schemas/BookingStatus' }
+        amount: { type: string, example: '4250.00', description: Decimal string, not a float }
+        scheduledAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        customer:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            name: { type: string }
+            phone: { type: string }
+            city: { type: string }
+        vehicle:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            make: { type: string }
+            model: { type: string }
+            regNumber: { type: string }
+        service:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            name: { type: string }
+            category: { $ref: '#/components/schemas/ServiceCategory' }
+        mechanic:
+          type: object
+          nullable: true
+          description: null while the booking is PENDING — that is the dispatch queue.
+          properties:
+            id: { type: string }
+            name: { type: string }
+            status: { $ref: '#/components/schemas/MechanicStatus' }
+
+    BookingEvent:
+      type: object
+      description: Append-only. Rows are never updated or deleted.
+      properties:
+        id: { type: string }
+        fromStatus: { allOf: [{ $ref: '#/components/schemas/BookingStatus' }], nullable: true }
+        toStatus: { $ref: '#/components/schemas/BookingStatus' }
+        note: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        actor:
+          type: object
+          nullable: true
+          description: The operator who made the change, from the JWT. null for system actions.
+          properties:
+            id: { type: string }
+            name: { type: string }
+            email: { type: string }
+
+    Mechanic:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        specialisation: { type: string }
+        status: { $ref: '#/components/schemas/MechanicStatus' }
+        rating: { type: string, example: '4.62' }
+        jobsCompleted:
+          {
+            type: integer,
+            description: Real COMPLETED booking count,
+            kept in step by every write path,
+          }
+        createdAt: { type: string, format: date-time }
+        currentBooking:
+          type: object
+          nullable: true
+          description: The live job, or the most recent one when idle.
+          properties:
+            id: { type: string }
+            code: { type: string }
+            status: { $ref: '#/components/schemas/BookingStatus' }
+            scheduledAt: { type: string, format: date-time }
+            amount: { type: string }
+            customerName: { type: string, nullable: true }
+            isActive: { type: boolean, description: true when live rather than merely most recent }
+        recentBookings:
+          type: array
+          description: Detail endpoint only.
+          items: { $ref: '#/components/schemas/Booking' }
+
+    Customer:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        city: { type: string }
+        createdAt: { type: string, format: date-time }
+        bookingCount: { type: integer }
+        vehicleCount: { type: integer, description: List endpoint only }
+        totalSpent: { type: string, example: '48210.55', description: COMPLETED bookings only }
+        vehicles:
+          type: array
+          description: Detail endpoint only.
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              make: { type: string }
+              model: { type: string }
+              year: { type: integer }
+              regNumber: { type: string }
+        bookings:
+          type: array
+          description: Detail endpoint only; 50 most recent.
+          items: { $ref: '#/components/schemas/Booking' }
+
+    Dashboard:
+      type: object
+      properties:
+        totalBookings: { type: integer }
+        todayBookings: { type: integer }
+        completedBookings: { type: integer }
+        pendingBookings: { type: integer }
+        cancelledBookings: { type: integer }
+        totalRevenue: { type: string, description: COMPLETED bookings only }
+        activeMechanics: { type: integer, description: Anything but OFF_DUTY }
+        newCustomers: { type: integer, description: Last 30 days }
+        changes:
+          type: object
+          description: Percent change vs the previous equivalent window. null where no honest baseline exists.
+          properties:
+            totalBookings: { type: number, nullable: true }
+            todayBookings: { type: number, nullable: true }
+            completedBookings: { type: number, nullable: true }
+            pendingBookings: { type: number, nullable: true }
+            cancelledBookings: { type: number, nullable: true }
+            totalRevenue: { type: number, nullable: true }
+            activeMechanics:
+              {
+                type: number,
+                nullable: true,
+                description: Always null — point-in-time gauge with no history,
+              }
+            newCustomers: { type: number, nullable: true }
+        generatedAt: { type: string, format: date-time }

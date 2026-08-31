@@ -51,7 +51,8 @@ model User {
   role         Role     @default(OPS)
   createdAt    DateTime @default(now())
 
-  bookingEvents BookingEvent[]
+  bookingEvents   BookingEvent[]
+  assignmentsMade BookingAssignment[]
 
   @@map("users")
 }
@@ -97,7 +98,8 @@ model Mechanic {
   jobsCompleted  Int            @default(0)
   createdAt      DateTime       @default(now())
 
-  bookings Booking[]
+  bookings    Booking[]
+  assignments BookingAssignment[]
 
   @@index([status])
   @@map("mechanics")
@@ -136,7 +138,8 @@ model Booking {
   service  Service   @relation(fields: [serviceId], references: [id], onDelete: Restrict)
   mechanic Mechanic? @relation(fields: [mechanicId], references: [id], onDelete: SetNull)
 
-  events BookingEvent[]
+  events      BookingEvent[]
+  assignments BookingAssignment[]
 
   // The dashboard filters and sorts on exactly these columns. Without the indexes every
   // ops query is a sequential scan over the whole booking table.
@@ -162,4 +165,23 @@ model BookingEvent {
 
   @@index([bookingId])
   @@map("booking_events")
+}
+
+/// Dispatch record. The @@unique below is the ONLY thing preventing a double-clicked assign
+/// button from sending two mechanics to one job. An app-level "check then write" races; the
+/// database constraint cannot.
+model BookingAssignment {
+  id         String   @id @default(cuid())
+  bookingId  String
+  mechanicId String
+  assignedBy String?
+  createdAt  DateTime @default(now())
+
+  booking  Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  mechanic Mechanic @relation(fields: [mechanicId], references: [id], onDelete: Cascade)
+  assigner User?    @relation(fields: [assignedBy], references: [id], onDelete: SetNull)
+
+  @@unique([bookingId, mechanicId])
+  @@index([mechanicId])
+  @@map("booking_assignments")
 }
