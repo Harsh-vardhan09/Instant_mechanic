@@ -1,6 +1,6 @@
-// Data model lands in a later prompt. Generator + datasource only, so `prisma validate` has a target.
-// Prisma 7: the connection URL lives in prisma.config.ts, NOT here. The runtime client gets a
-// driver adapter (@prisma/adapter-pg) instead of a `url` in this block.
+// instant-mechanic — operations dashboard data model.
+// Prisma 7: the connection URL lives in prisma.config.ts, never here. The runtime client
+// gets a @prisma/adapter-pg driver adapter; migrations use DIRECT_URL (port 5432).
 
 generator client {
   provider = "prisma-client-js"
@@ -8,4 +8,158 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+// ─────────────────────────── enums ───────────────────────────
+
+enum Role {
+  ADMIN
+  OPS
+}
+
+enum MechanicStatus {
+  AVAILABLE
+  ON_JOB
+  OFF_DUTY
+}
+
+enum ServiceCategory {
+  MAINTENANCE
+  REPAIR
+  DIAGNOSTIC
+  EMERGENCY
+  INSPECTION
+}
+
+enum BookingStatus {
+  PENDING
+  ASSIGNED
+  ON_THE_WAY
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// ─────────────────────────── models ───────────────────────────
+
+/// Dashboard operator. Not a customer — customers never log in here.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(OPS)
+  createdAt    DateTime @default(now())
+
+  bookingEvents BookingEvent[]
+
+  @@map("users")
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  phone     String
+  city      String
+  createdAt DateTime @default(now())
+
+  vehicles Vehicle[]
+  bookings Booking[]
+
+  @@index([city])
+  @@map("customers")
+}
+
+model Vehicle {
+  id         String @id @default(cuid())
+  customerId String
+  make       String
+  model      String
+  year       Int
+  regNumber  String @unique
+
+  customer Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@index([customerId])
+  @@map("vehicles")
+}
+
+model Mechanic {
+  id             String         @id @default(cuid())
+  name           String
+  email          String         @unique
+  phone          String
+  specialisation String
+  status         MechanicStatus @default(AVAILABLE)
+  rating         Decimal        @default(0) @db.Decimal(3, 2)
+  jobsCompleted  Int            @default(0)
+  createdAt      DateTime       @default(now())
+
+  bookings Booking[]
+
+  @@index([status])
+  @@map("mechanics")
+}
+
+model Service {
+  id           String          @id @default(cuid())
+  name         String
+  category     ServiceCategory
+  basePrice    Decimal         @db.Decimal(10, 2)
+  durationMins Int
+
+  bookings Booking[]
+
+  @@index([category])
+  @@map("services")
+}
+
+model Booking {
+  /// Human-readable reference ops reads aloud on the phone, e.g. BK-10234.
+  id          String        @id @default(cuid())
+  code        String        @unique
+  customerId  String
+  vehicleId   String
+  serviceId   String
+  mechanicId  String?
+  status      BookingStatus @default(PENDING)
+  amount      Decimal       @db.Decimal(10, 2)
+  scheduledAt DateTime
+  completedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  customer Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  vehicle  Vehicle   @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  service  Service   @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  mechanic Mechanic? @relation(fields: [mechanicId], references: [id], onDelete: SetNull)
+
+  events BookingEvent[]
+
+  // The dashboard filters and sorts on exactly these columns. Without the indexes every
+  // ops query is a sequential scan over the whole booking table.
+  @@index([status])
+  @@index([createdAt])
+  @@index([mechanicId])
+  @@index([customerId])
+  @@map("bookings")
+}
+
+/// Append-only audit of every booking status transition. Rows are never updated or deleted.
+model BookingEvent {
+  id         String         @id @default(cuid())
+  bookingId  String
+  fromStatus BookingStatus?
+  toStatus   BookingStatus
+  actorId    String?
+  note       String?
+  createdAt  DateTime       @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@map("booking_events")
 }
