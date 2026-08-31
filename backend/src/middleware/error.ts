@@ -12,17 +12,10 @@ export interface ErrorBody {
 interface Mapped {
   statusCode: number;
   code: string;
-  /** Safe to send to a client verbatim. */
   message: string;
   details?: unknown;
 }
 
-/**
- * Translates a thrown value into a client-safe shape.
- *
- * Prisma messages are never forwarded: they embed table names, column names and sometimes
- * the offending value, which is internal structure at best and customer PII at worst.
- */
 function mapError(err: unknown): Mapped {
   if (err instanceof AppError) {
     return {
@@ -85,11 +78,6 @@ function mapError(err: unknown): Mapped {
   return { statusCode: 500, code: 'INTERNAL_ERROR', message: 'Internal server error' };
 }
 
-/**
- * Central error handler. Registered LAST — after every route and the 404 handler.
- * In production the response body carries a code and a safe message. Never a stack,
- * never a raw Prisma message.
- */
 export function errorHandler(err: unknown, req: Request, res: Response, next: NextFunction): void {
   if (res.headersSent) {
     next(err);
@@ -98,7 +86,6 @@ export function errorHandler(err: unknown, req: Request, res: Response, next: Ne
 
   const mapped = mapError(err);
 
-  // Full detail goes to the log (redacted by lib/logger.ts), never to the client.
   const log = {
     err,
     statusCode: mapped.statusCode,

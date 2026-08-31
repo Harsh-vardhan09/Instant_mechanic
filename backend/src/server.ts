@@ -3,13 +3,23 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { closeIo, initIo } from './realtime/io.js';
-import { disconnectPrisma } from './lib/prisma.js';
+import { connectPrisma, disconnectPrisma } from './lib/prisma.js';
 
 const app = createApp();
 const httpServer = createServer(app);
 
 // REST and websockets share one port — one thing to deploy, one thing to expose on AWS.
 initIo(httpServer);
+
+async function startDB(): Promise<void> {
+  try {
+    await connectPrisma();
+  } catch (error) {
+    logger.error(error);
+  }
+}
+
+startDB();
 
 const server = httpServer.listen(env.PORT, () => {
   logger.info({ port: env.PORT, env: env.NODE_ENV }, 'instant-mechanic api listening');

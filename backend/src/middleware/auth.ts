@@ -4,7 +4,6 @@ import type { Role } from '@prisma/client';
 import { env } from '../config/env.js';
 import { ForbiddenError, UnauthorizedError } from '../shared/errors.js';
 
-/** Exactly what the token carries — nothing more ends up in a JWT. */
 export interface JwtPayload {
   sub: string;
   email: string;
@@ -69,11 +68,6 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
   }
 };
 
-/**
- * Role gate, evaluated SERVER-SIDE on the route. A hidden button in the UI is not access
- * control — this is the only thing standing between an OPS session and an admin action.
- * Always mounted after requireAuth.
- */
 export const requireRole =
   (...roles: readonly Role[]): RequestHandler =>
   (req: Request, _res: Response, next: NextFunction) => {

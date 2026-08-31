@@ -1,20 +1,20 @@
 import bcrypt from 'bcryptjs';
-import type { BookingStatus, MechanicStatus, ServiceCategory } from '@prisma/client';
+import type { BookingStatus, ServiceCategory } from '@prisma/client';
 import { prisma } from '../src/lib/prisma.js';
 
 /**
- * Seeds the bootstrap ADMIN and a realistic slice of operational data.
+ * Seeds a realistic operational dataset for the dashboard.
  *
- * Idempotent by construction: every row has a deterministic `seed_*` id and is inserted with
- * createMany({ skipDuplicates: true }), so rerunning is a no-op rather than a duplicate load.
- * The P14 gate requires pipelines to be rerunnable — this is that, not a promise about it.
- *
- * Deterministic too: one fixed-seed PRNG drives every choice, so the same command produces
- * identical data on every machine. A dashboard bug that reproduces for you reproduces for me.
+ * Idempotent by truncation: every run starts from an empty set of domain tables, so the
+ * output is the same whether it is the first run or the fifth. Combined with a fixed PRNG
+ * seed the data is byte-identical every time — a bug you see on your machine reproduces on
+ * mine, and screenshots stay stable between demos.
  */
 const BCRYPT_ROUNDS = 10;
+const DEMO_PASSWORD = 'Password123!';
 
-/** Mulberry32 — tiny, seeded, no dependency. Reproducibility over cryptographic quality. */
+// ── deterministic randomness ────────────────────────────────────────────────
+/** Mulberry32 — small, seeded, no dependency. Reproducibility over cryptographic quality. */
 function rng(seed: number): () => number {
   let a = seed;
   return () => {
@@ -30,7 +30,17 @@ const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)] as T
 const int = (min: number, max: number): number => Math.floor(rand() * (max - min + 1)) + min;
 const pad = (n: number, w = 3): string => String(n).padStart(w, '0');
 
-const FIRST = [
+/** Fisher-Yates using the seeded PRNG, so shuffles are reproducible too. */
+function shuffle<T>(xs: T[]): T[] {
+  for (let i = xs.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [xs[i], xs[j]] = [xs[j] as T, xs[i] as T];
+  }
+  return xs;
+}
+
+// ── reference data ──────────────────────────────────────────────────────────
+const FIRST_NAMES = [
   'Aarav',
   'Priya',
   'Rohan',
@@ -51,8 +61,19 @@ const FIRST = [
   'Riya',
   'Vivek',
   'Tara',
+  'Nikhil',
+  'Ishita',
+  'Rajesh',
+  'Sunita',
+  'Harsh',
+  'Neha',
+  'Amit',
+  'Lakshmi',
+  'Sanjay',
+  'Anjali',
 ] as const;
-const LAST = [
+
+const LAST_NAMES = [
   'Sharma',
   'Patel',
   'Iyer',
@@ -65,36 +86,56 @@ const LAST = [
   'Joshi',
   'Kulkarni',
   'Bose',
+  'Chauhan',
+  'Malhotra',
+  'Rao',
+  'Verma',
+  'Pillai',
+  'Bhatt',
 ] as const;
+
+/** City paired with the RTO code its registration plates actually use. */
 const CITIES = [
-  'Mumbai',
-  'Pune',
-  'Bengaluru',
-  'Hyderabad',
-  'Delhi',
-  'Chennai',
-  'Ahmedabad',
-  'Kolkata',
+  { city: 'Mumbai', rto: 'MH01' },
+  { city: 'Pune', rto: 'MH12' },
+  { city: 'Bengaluru', rto: 'KA01' },
+  { city: 'Hyderabad', rto: 'TS09' },
+  { city: 'Delhi', rto: 'DL03' },
+  { city: 'Chennai', rto: 'TN10' },
+  { city: 'Ahmedabad', rto: 'GJ01' },
+  { city: 'Kolkata', rto: 'WB02' },
+  { city: 'Jaipur', rto: 'RJ14' },
+  { city: 'Kochi', rto: 'KL07' },
 ] as const;
+
 const MAKES = [
-  ['Maruti Suzuki', ['Swift', 'Baleno', 'Dzire', 'Brezza']],
-  ['Hyundai', ['i20', 'Creta', 'Venue', 'Verna']],
-  ['Tata', ['Nexon', 'Punch', 'Harrier', 'Altroz']],
-  ['Mahindra', ['XUV700', 'Thar', 'Scorpio', 'Bolero']],
-  ['Honda', ['City', 'Amaze', 'Elevate']],
-  ['Toyota', ['Innova', 'Fortuner', 'Glanza']],
+  { make: 'Maruti Suzuki', models: ['Swift', 'Baleno', 'Dzire', 'Brezza', 'WagonR'] },
+  { make: 'Hyundai', models: ['i20', 'Creta', 'Venue', 'Verna', 'Grand i10'] },
+  { make: 'Tata', models: ['Nexon', 'Punch', 'Harrier', 'Altroz', 'Tiago'] },
+  { make: 'Mahindra', models: ['XUV700', 'Thar', 'Scorpio', 'Bolero', 'XUV300'] },
+  { make: 'Honda', models: ['City', 'Amaze', 'Elevate', 'Jazz'] },
+  { make: 'Toyota', models: ['Innova Crysta', 'Fortuner', 'Glanza', 'Urban Cruiser'] },
+  { make: 'Kia', models: ['Seltos', 'Sonet', 'Carens'] },
+  { make: 'Volkswagen', models: ['Polo', 'Virtus', 'Taigun'] },
 ] as const;
+
 const SPECIALISATIONS = [
   'Engine & Transmission',
   'Brakes & Suspension',
   'Electrical & Battery',
   'AC & Cooling',
-  'Tyres & Wheels',
+  'Tyres & Wheel Alignment',
+  'Denting & Painting',
   'Diagnostics',
-  'Bodywork',
   'General Service',
 ] as const;
 
+/**
+ * Ten services covering the eight requested areas. The `category` values are the five
+ * members of the ServiceCategory enum in schema.prisma — the requested list (Battery,
+ * Tyres, AC, Denting & Painting …) is finer-grained than that enum, so those areas live in
+ * the service NAME and roll up to the nearest enum category.
+ */
 const SERVICES: readonly {
   name: string;
   category: ServiceCategory;
@@ -102,11 +143,23 @@ const SERVICES: readonly {
   durationMins: number;
 }[] = [
   { name: 'Periodic Service', category: 'MAINTENANCE', basePrice: '3499.00', durationMins: 120 },
-  { name: 'Engine Oil Change', category: 'MAINTENANCE', basePrice: '1899.00', durationMins: 45 },
-  { name: 'Brake Pad Replacement', category: 'REPAIR', basePrice: '4250.00', durationMins: 90 },
-  { name: 'AC Service & Regas', category: 'REPAIR', basePrice: '3200.00', durationMins: 75 },
-  { name: 'Battery Jumpstart', category: 'EMERGENCY', basePrice: '899.00', durationMins: 30 },
-  { name: 'Roadside Breakdown', category: 'EMERGENCY', basePrice: '2500.00', durationMins: 60 },
+  {
+    name: 'Comprehensive Service',
+    category: 'MAINTENANCE',
+    basePrice: '6499.00',
+    durationMins: 240,
+  },
+  {
+    name: 'Tyre Replacement & Wheel Balancing',
+    category: 'MAINTENANCE',
+    basePrice: '5200.00',
+    durationMins: 90,
+  },
+  { name: 'Engine & Clutch Repair', category: 'REPAIR', basePrice: '8750.00', durationMins: 360 },
+  { name: 'Denting & Painting', category: 'REPAIR', basePrice: '7400.00', durationMins: 480 },
+  { name: 'AC Service & Gas Refill', category: 'REPAIR', basePrice: '3200.00', durationMins: 75 },
+  { name: 'Battery Replacement', category: 'EMERGENCY', basePrice: '5400.00', durationMins: 40 },
+  { name: 'Roadside Assistance', category: 'EMERGENCY', basePrice: '1500.00', durationMins: 60 },
   { name: 'Full Diagnostic Scan', category: 'DIAGNOSTIC', basePrice: '1499.00', durationMins: 50 },
   {
     name: 'Pre-Purchase Inspection',
@@ -116,27 +169,28 @@ const SERVICES: readonly {
   },
 ];
 
-/** Weighted so the dashboard shows a believable mix, not an even split. */
-const STATUS_WEIGHTS: readonly (readonly [BookingStatus, number])[] = [
-  ['COMPLETED', 55],
-  ['IN_PROGRESS', 12],
-  ['PENDING', 10],
-  ['ASSIGNED', 8],
-  ['CANCELLED', 8],
-  ['ON_THE_WAY', 7],
+// ── volumes ─────────────────────────────────────────────────────────────────
+const N_CUSTOMERS = 60;
+const N_VEHICLES = 90; // 30 customers own a second car
+const N_MECHANICS = 25;
+const N_BOOKINGS = 650;
+const N_TODAY = 25; // so "Today's bookings" is never zero during a demo
+const DAYS_BACK = 90;
+
+/** Exact counts, not probabilities — 650 rows is small enough that sampling drifts visibly. */
+const STATUS_MIX: readonly (readonly [BookingStatus, number])[] = [
+  ['COMPLETED', 0.55],
+  ['PENDING', 0.12],
+  ['ASSIGNED', 0.1],
+  ['ON_THE_WAY', 0.08],
+  ['IN_PROGRESS', 0.08],
+  ['CANCELLED', 0.07],
 ];
 
-function pickStatus(): BookingStatus {
-  const total = STATUS_WEIGHTS.reduce((s, [, w]) => s + w, 0);
-  let r = rand() * total;
-  for (const [status, w] of STATUS_WEIGHTS) {
-    r -= w;
-    if (r <= 0) return status;
-  }
-  return 'COMPLETED';
-}
+/** A booking still moving through the pipeline. Today's bookings are drawn from these. */
+const IN_FLIGHT: readonly BookingStatus[] = ['PENDING', 'ASSIGNED', 'ON_THE_WAY', 'IN_PROGRESS'];
 
-/** Transitions preceding a status, so BookingEvent reads as a real audit chain. */
+/** Transitions that precede a status, so the audit trail reads as a real history. */
 const CHAIN: Record<BookingStatus, readonly BookingStatus[]> = {
   PENDING: [],
   ASSIGNED: ['ASSIGNED'],
@@ -146,82 +200,116 @@ const CHAIN: Record<BookingStatus, readonly BookingStatus[]> = {
   CANCELLED: ['CANCELLED'],
 };
 
-const N_MECHANICS = 12;
-const N_CUSTOMERS = 45;
-const N_BOOKINGS = 260; // > 100 so the pagination limit cap is exercised by real data
-const DAYS_BACK = 90;
+const EVENT_NOTES: Partial<Record<BookingStatus, readonly string[]>> = {
+  ASSIGNED: ['Mechanic assigned by ops', 'Auto-assigned to nearest available mechanic'],
+  ON_THE_WAY: ['Mechanic en route', 'Left depot'],
+  IN_PROGRESS: ['Work started on site', 'Vehicle received at workshop'],
+  COMPLETED: ['Job completed, invoice raised', 'Work finished and vehicle handed over'],
+  CANCELLED: [
+    'Cancelled by customer',
+    'Cancelled — vehicle unavailable',
+    'Rescheduled by customer',
+  ],
+};
 
-async function seedAdmin(): Promise<string | null> {
-  const email = process.env['SEED_ADMIN_EMAIL']?.toLowerCase().trim();
-  const password = process.env['SEED_ADMIN_PASSWORD'];
-  const name = process.env['SEED_ADMIN_NAME'] ?? 'Admin';
+const day = 86_400_000;
 
-  if (email && password) {
-    if (password.length < 12) throw new Error('SEED_ADMIN_PASSWORD must be at least 12 characters');
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) {
-      console.log(`admin already exists: ${email} — not modified`);
-      return existing.id;
+/**
+ * Picks a createdAt within the window, weighted so weekdays are busier than weekends —
+ * a flat distribution is the giveaway that a dataset is synthetic.
+ */
+function weekdayWeightedDate(now: number): Date {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const daysAgo = rand() * DAYS_BACK;
+    const ts = now - daysAgo * day;
+    const dow = new Date(ts).getDay(); // 0 Sun … 6 Sat
+    const weight = dow === 0 ? 0.3 : dow === 6 ? 0.55 : 1;
+    if (rand() <= weight) {
+      // Cluster inside working hours rather than uniformly across midnight.
+      const d = new Date(ts);
+      d.setHours(int(8, 19), int(0, 59), int(0, 59), 0);
+      return d;
     }
-    const user = await prisma.user.create({
-      data: {
-        email,
-        name,
-        role: 'ADMIN',
-        passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
-      },
-    });
-    console.log(`seeded ADMIN ${user.email}`);
-    return user.id;
   }
-
-  const anyAdmin = await prisma.user.findFirst({ where: { role: 'ADMIN' } });
-  if (anyAdmin) {
-    console.log(`admin present (${anyAdmin.email}) — skipping admin seed`);
-    return anyAdmin.id;
-  }
-  throw new Error(
-    'No ADMIN exists and no credentials given. Bootstrap one:\n' +
-      '  SEED_ADMIN_EMAIL=ops@example.com SEED_ADMIN_PASSWORD="<12+ chars>" npm run db:seed',
-  );
+  return new Date(now - rand() * DAYS_BACK * day);
 }
 
-async function seedDomain(actorId: string | null): Promise<void> {
+async function truncateAll(): Promise<void> {
+  // One statement, FK-safe: CASCADE resolves ordering, RESTART IDENTITY resets sequences.
+  // Domain tables only — this is a demo dataset, not a production reset.
+  await prisma.$executeRawUnsafe(
+    'TRUNCATE TABLE booking_events, bookings, vehicles, customers, mechanics, services, users RESTART IDENTITY CASCADE',
+  );
+  console.log('truncated domain tables (FK-safe, CASCADE)');
+}
+
+async function main(): Promise<void> {
   const now = Date.now();
-  const day = 86_400_000;
+  await truncateAll();
+
+  // ── users ─────────────────────────────────────────────────────────────────
+  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, BCRYPT_ROUNDS);
+  const users = [
+    {
+      id: 'seed_usr_admin',
+      email: 'admin@instantmechanic.com',
+      name: 'Admin User',
+      role: 'ADMIN' as const,
+      passwordHash,
+    },
+    {
+      id: 'seed_usr_ops',
+      email: 'ops@instantmechanic.com',
+      name: 'Ops User',
+      role: 'OPS' as const,
+      passwordHash,
+    },
+  ];
+  await prisma.user.createMany({ data: users });
+  const adminId = 'seed_usr_admin';
 
   // ── services ──────────────────────────────────────────────────────────────
   const services = SERVICES.map((s, i) => ({ id: `seed_svc_${pad(i + 1)}`, ...s }));
-  await prisma.service.createMany({ data: services, skipDuplicates: true });
+  await prisma.service.createMany({ data: services });
 
-  // ── mechanics ─────────────────────────────────────────────────────────────
+  // ── mechanics (jobsCompleted filled in later, from real booking counts) ────
   const mechanics = Array.from({ length: N_MECHANICS }, (_, i) => ({
     id: `seed_mec_${pad(i + 1)}`,
-    name: `${pick(FIRST)} ${pick(LAST)}`,
-    email: `mechanic${pad(i + 1)}@instantmechanic.local`,
-    phone: `+9198${int(10000000, 99999999)}`,
+    name: `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`,
+    email: `mechanic${pad(i + 1)}@instantmechanic.com`,
+    phone: `+91${pick(['98', '97', '99', '88', '76'] as const)}${int(10000000, 99999999)}`,
     specialisation: pick(SPECIALISATIONS),
-    status: pick(['AVAILABLE', 'AVAILABLE', 'ON_JOB', 'OFF_DUTY'] as const) as MechanicStatus,
-    rating: (3.4 + rand() * 1.6).toFixed(2),
-    jobsCompleted: int(5, 320),
+    status: pick(['AVAILABLE', 'AVAILABLE', 'AVAILABLE', 'ON_JOB', 'ON_JOB', 'OFF_DUTY'] as const),
+    rating: (3.3 + rand() * 1.7).toFixed(2),
+    jobsCompleted: 0,
   }));
-  await prisma.mechanic.createMany({ data: mechanics, skipDuplicates: true });
+  await prisma.mechanic.createMany({ data: mechanics });
 
-  // ── customers + vehicles ──────────────────────────────────────────────────
+  // ── customers ─────────────────────────────────────────────────────────────
+  // The RTO code is kept beside the customers rather than on them: it is not a column, it
+  // only decides what their number plate looks like.
+  const rtoByCustomer = new Map<string, string>();
   const customers = Array.from({ length: N_CUSTOMERS }, (_, i) => {
-    const first = pick(FIRST);
-    const last = pick(LAST);
+    const first = pick(FIRST_NAMES);
+    const last = pick(LAST_NAMES);
+    const place = pick(CITIES);
+    const id = `seed_cus_${pad(i + 1)}`;
+    rtoByCustomer.set(id, place.rto);
     return {
-      id: `seed_cus_${pad(i + 1)}`,
+      id,
       name: `${first} ${last}`,
-      email: `${first.toLowerCase()}.${last.toLowerCase()}${pad(i + 1)}@example.com`,
-      phone: `+9197${int(10000000, 99999999)}`,
-      city: pick(CITIES),
-      createdAt: new Date(now - int(DAYS_BACK, 400) * day),
+      email: `${first.toLowerCase()}.${last.toLowerCase()}${pad(i + 1)}@gmail.com`,
+      phone: `+91${pick(['98', '97', '99', '81', '73'] as const)}${int(10000000, 99999999)}`,
+      city: place.city,
+      createdAt: new Date(now - int(DAYS_BACK, 500) * day),
     };
   });
-  await prisma.customer.createMany({ data: customers, skipDuplicates: true });
+  await prisma.customer.createMany({ data: customers });
 
+  // ── vehicles: 90 across 60 customers, so 30 own two ────────────────────────
+  const secondCarOwners = new Set(
+    shuffle(customers.map((c) => c.id)).slice(0, N_VEHICLES - N_CUSTOMERS),
+  );
   const vehicles: {
     id: string;
     customerId: string;
@@ -230,27 +318,39 @@ async function seedDomain(actorId: string | null): Promise<void> {
     year: number;
     regNumber: string;
   }[] = [];
-  let v = 0;
   for (const c of customers) {
-    const count = int(1, 2);
+    const count = secondCarOwners.has(c.id) ? 2 : 1;
     for (let k = 0; k < count; k++) {
-      v += 1;
-      const entry = pick(MAKES);
-      const make = entry[0];
-      const models = entry[1];
-      const letterA = String.fromCharCode(65 + int(0, 25));
-      const letterB = String.fromCharCode(65 + int(0, 25));
+      const n = vehicles.length + 1;
+      const brand = pick(MAKES);
+      const letters = String.fromCharCode(65 + int(0, 25)) + String.fromCharCode(65 + int(0, 25));
       vehicles.push({
-        id: `seed_veh_${pad(v)}`,
+        id: `seed_veh_${pad(n)}`,
         customerId: c.id,
-        make,
-        model: pick(models),
-        year: int(2014, 2025),
-        regNumber: `MH${int(10, 49)}${letterA}${letterB}${pad(v, 4)}`,
+        make: brand.make,
+        model: pick(brand.models),
+        year: int(2013, 2026),
+        regNumber: `${rtoByCustomer.get(c.id) ?? 'MH01'}${letters}${pad(1000 + n, 4)}`,
       });
     }
   }
-  await prisma.vehicle.createMany({ data: vehicles, skipDuplicates: true });
+  await prisma.vehicle.createMany({ data: vehicles });
+
+  // ── status pool: exact counts, split into today vs history ────────────────
+  const pool: BookingStatus[] = [];
+  for (const [status, share] of STATUS_MIX) {
+    for (let i = 0; i < Math.round(share * N_BOOKINGS); i++) pool.push(status);
+  }
+  while (pool.length < N_BOOKINGS) pool.push('COMPLETED');
+  while (pool.length > N_BOOKINGS) pool.pop();
+  shuffle(pool);
+
+  // Today's bookings are drawn from in-flight statuses only: a job booked this morning and
+  // already marked COMPLETED-90-days-of-history is not a thing ops would ever see.
+  const todayStatuses: BookingStatus[] = [];
+  for (let i = pool.length - 1; i >= 0 && todayStatuses.length < N_TODAY; i--) {
+    if (IN_FLIGHT.includes(pool[i] as BookingStatus)) todayStatuses.push(...pool.splice(i, 1));
+  }
 
   // ── bookings + audit events ───────────────────────────────────────────────
   const bookings: {
@@ -278,28 +378,35 @@ async function seedDomain(actorId: string | null): Promise<void> {
     createdAt: Date;
   }[] = [];
 
-  let e = 0;
-  for (let i = 0; i < N_BOOKINGS; i++) {
+  const completedByMechanic = new Map<string, number>();
+  let eventNo = 0;
+
+  const makeBooking = (index: number, status: BookingStatus, createdAt: Date): void => {
     const vehicle = pick(vehicles);
     const service = pick(services);
-    const status = pickStatus();
-    // PENDING bookings have no mechanic yet — that is the whole point of the dispatch queue.
-    const mechanicId = status === 'PENDING' ? null : pick(mechanics).id;
 
-    const createdAt = new Date(now - rand() * DAYS_BACK * day);
+    // A PENDING booking has no mechanic yet — that IS the dispatch queue. Everything past
+    // ASSIGNED must have one. CANCELLED may or may not, depending when it was called off.
+    const needsMechanic = status !== 'PENDING' && !(status === 'CANCELLED' && rand() < 0.5);
+    const mechanicId = needsMechanic ? pick(mechanics).id : null;
+
     const scheduledAt = new Date(createdAt.getTime() + int(2, 96) * 3_600_000);
     const completedAt =
       status === 'COMPLETED'
         ? new Date(scheduledAt.getTime() + service.durationMins * 60_000)
         : null;
 
-    // Final price varies around the base: parts, labour, the odd discount.
-    const amount = (Number(service.basePrice) * (0.9 + rand() * 0.45)).toFixed(2);
-    const id = `seed_bkg_${pad(i + 1, 4)}`;
+    if (status === 'COMPLETED' && mechanicId) {
+      completedByMechanic.set(mechanicId, (completedByMechanic.get(mechanicId) ?? 0) + 1);
+    }
+
+    // Parts, labour and the occasional discount move the final price off the list price.
+    const amount = (Number(service.basePrice) * (0.85 + rand() * 0.5)).toFixed(2);
+    const id = `seed_bkg_${pad(index + 1, 4)}`;
 
     bookings.push({
       id,
-      code: `BK-${10000 + i}`,
+      code: `BK-${10000 + index}`,
       customerId: vehicle.customerId,
       vehicleId: vehicle.id,
       serviceId: service.id,
@@ -312,10 +419,10 @@ async function seedDomain(actorId: string | null): Promise<void> {
       updatedAt: completedAt ?? scheduledAt,
     });
 
+    // Every booking gets at least this row, so the audit trail is never empty.
     let at = createdAt.getTime();
-    // Every booking starts life as PENDING — record that as the first audit row.
     events.push({
-      id: `seed_evt_${pad(++e, 5)}`,
+      id: `seed_evt_${pad(++eventNo, 5)}`,
       bookingId: id,
       fromStatus: null,
       toStatus: 'PENDING',
@@ -327,47 +434,73 @@ async function seedDomain(actorId: string | null): Promise<void> {
     let from: BookingStatus = 'PENDING';
     for (const to of CHAIN[status]) {
       at += int(10, 240) * 60_000;
+      const notes = EVENT_NOTES[to];
       events.push({
-        id: `seed_evt_${pad(++e, 5)}`,
+        id: `seed_evt_${pad(++eventNo, 5)}`,
         bookingId: id,
         fromStatus: from,
         toStatus: to,
-        actorId,
-        note: null,
+        actorId: adminId,
+        note: notes ? pick(notes) : null,
         createdAt: new Date(at),
       });
       from = to;
     }
-  }
+  };
 
-  await prisma.booking.createMany({ data: bookings, skipDuplicates: true });
-  // Chunked: one huge INSERT over a pooled internet connection is a timeout waiting to happen.
+  pool.forEach((status, i) => makeBooking(i, status, weekdayWeightedDate(now)));
+  todayStatuses.forEach((status, i) => {
+    const today = new Date(now);
+    today.setHours(int(7, Math.max(8, new Date(now).getHours())), int(0, 59), int(0, 59), 0);
+    makeBooking(pool.length + i, status, today);
+  });
+
+  await prisma.booking.createMany({ data: bookings });
+  // Chunked: one multi-thousand-row INSERT over a pooled internet connection is a timeout
+  // waiting to happen.
   for (let i = 0; i < events.length; i += 500) {
-    await prisma.bookingEvent.createMany({ data: events.slice(i, i + 500), skipDuplicates: true });
+    await prisma.bookingEvent.createMany({ data: events.slice(i, i + 500) });
   }
 
-  console.log(
-    `seeded: ${services.length} services, ${mechanics.length} mechanics, ${customers.length} customers, ` +
-      `${vehicles.length} vehicles, ${bookings.length} bookings, ${events.length} events`,
-  );
-}
+  // ── make the denormalised counter tell the truth ──────────────────────────
+  // jobsCompleted is derived from the bookings actually seeded, never invented. A
+  // denormalised field that disagrees with its source is worse than no field at all.
+  for (const [mechanicId, count] of completedByMechanic) {
+    await prisma.mechanic.update({ where: { id: mechanicId }, data: { jobsCompleted: count } });
+  }
 
-async function main(): Promise<void> {
-  const actorId = await seedAdmin();
-  await seedDomain(actorId);
+  // ── report ────────────────────────────────────────────────────────────────
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
 
-  const [customers, vehicles, mechanics, servicesN, bookings, events] = await Promise.all([
-    prisma.customer.count(),
-    prisma.vehicle.count(),
-    prisma.mechanic.count(),
-    prisma.service.count(),
-    prisma.booking.count(),
-    prisma.bookingEvent.count(),
+  const [byStatus, todayCount, revenue, counts] = await Promise.all([
+    prisma.booking.groupBy({ by: ['status'], _count: true }),
+    prisma.booking.count({ where: { createdAt: { gte: startOfToday } } }),
+    prisma.booking.aggregate({ where: { status: 'COMPLETED' }, _sum: { amount: true } }),
+    Promise.all([
+      prisma.user.count(),
+      prisma.customer.count(),
+      prisma.vehicle.count(),
+      prisma.mechanic.count(),
+      prisma.service.count(),
+      prisma.booking.count(),
+      prisma.bookingEvent.count(),
+    ]),
   ]);
+
+  const [nUsers, nCustomers, nVehicles, nMechanics, nServices, nBookings, nEvents] = counts;
   console.log(
-    `totals -> customers=${customers} vehicles=${vehicles} mechanics=${mechanics} ` +
-      `services=${servicesN} bookings=${bookings} events=${events}`,
+    `\nseeded: users=${nUsers} customers=${nCustomers} vehicles=${nVehicles} ` +
+      `mechanics=${nMechanics} services=${nServices} bookings=${nBookings} events=${nEvents}`,
   );
+  console.log(`today's bookings: ${todayCount}`);
+  console.log(`completed revenue: ${revenue._sum.amount?.toString() ?? '0'}`);
+  console.log('status distribution:');
+  for (const row of [...byStatus].sort((a, b) => b._count - a._count)) {
+    const pct = ((row._count / nBookings) * 100).toFixed(1);
+    console.log(`  ${row.status.padEnd(12)} ${String(row._count).padStart(3)}  ${pct}%`);
+  }
+  console.log(`\nlogin: admin@instantmechanic.com / ops@instantmechanic.com — ${DEMO_PASSWORD}`);
 }
 
 main()
