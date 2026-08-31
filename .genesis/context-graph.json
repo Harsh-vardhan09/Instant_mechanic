@@ -1,0 +1,60 @@
+{
+  "$comment": "nodes=modules, edges=[cause,effect] where cause is imported-by effect. ADD invariants by hand.",
+  "project": ".",
+  "generated": "2026-08-31T17:04:45.104Z",
+  "nodes": [
+    "eslint.config",
+    "globals",
+    "layout",
+    "laypout",
+    "next-env.d",
+    "next.config",
+    "page",
+    "postcss.config",
+    "prisma.config",
+    "root-params.d",
+    "routes.d"
+  ],
+  "edges": [
+    [
+      "globals",
+      "layout"
+    ],
+    [
+      "root-params.d",
+      "next-env.d"
+    ],
+    [
+      "routes.d",
+      "next-env.d"
+    ]
+  ],
+  "invariants": {
+    "revenue-aggregates-in-sql": {
+      "rule": "Revenue and count totals are computed over the full filtered set in the database (SQL aggregate), never summed in JS from a paginated page of rows.",
+      "why": "The classic dashboard lie: page 1 of 20 sums to a number that looks real and is wrong. Ops makes money decisions on this figure.",
+      "check": "grep -rn 'reduce(' frontend/app backend/src | grep -iE 'revenue|total|amount' # must return nothing"
+    },
+    "ui-never-imports-prisma": {
+      "rule": "No file under frontend/app/** imports @prisma/client directly; all data access goes through the query layer built in M2.",
+      "why": "Keeps the DB a detail behind one seam, so schema changes hit one module instead of every page. Dependency direction stays inward.",
+      "check": "grep -rn '@prisma/client' frontend/app | grep -v node_modules # must return nothing"
+    },
+    "every-db-call-has-a-timeout": {
+      "rule": "Every query to Supabase runs under an explicit timeout and a bounded connection pool. No unbounded await.",
+      "why": "Supabase is reached over the public internet, not a private network. A hung socket with no timeout freezes an ops screen indefinitely during an incident, exactly when it's needed.",
+      "check": "grep -rn 'statement_timeout|connect_timeout|pool_timeout' backend/prisma.config.ts backend/.env.example # must match"
+    },
+    "dispatch-is-idempotent": {
+      "rule": "Assigning a mechanic to a booking twice results in exactly one assignment and one audit row. Enforced by a DB unique constraint, not by app-level checking.",
+      "why": "Double-clicked buttons and retried requests are normal. Two mechanics dispatched to one job is a real-world cost, and app-level guards race.",
+      "check": "cd backend && node --test src/dispatch/ # includes an explicit double-dispatch case"
+    }
+  },
+  "freeze_boundary": [
+    "backend/src/**",
+    "backend/prisma/**",
+    "frontend/app/**",
+    "frontend/components/**"
+  ]
+}

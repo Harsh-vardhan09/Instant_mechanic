@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DONE — instant-mechanic</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --ink:#e6edf3; --mut:#8b949e;
+          --ok:#2ea043; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.55 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:920px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:32px 0 12px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+  .sub { color:var(--mut); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:12px 0; }
+  .locked { border-left:3px solid var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:600; }
+  code { background:#1f2630; padding:1px 6px; border-radius:5px; font-size:13px; }
+  .gate { display:flex; gap:10px; align-items:flex-start; padding:6px 0; }
+  .box { width:16px; height:16px; border:1.5px solid var(--mut); border-radius:4px; flex:0 0 auto; margin-top:2px; }
+  .done .box { background:var(--ok); border-color:var(--ok); }
+  .done .label { color:var(--mut); text-decoration:line-through; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--mut); }
+  .pill.ok{color:var(--ok);border-color:var(--ok);} .pill.wip{color:var(--warn);border-color:var(--warn);}
+  .note { color:var(--mut); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>DONE — instant-mechanic</h1>
+  <p class="sub">The single source of truth for <b>what "done" means</b> and <b>the implementation plan</b>.
+     This file is LOCKED — the driver model may not edit it without explicit user request.
+     Updated: 2026-08-31</p>
+
+  <!-- ───────────── THE LOCKED SPEC ───────────── -->
+  <h2>1 · The Locked Spec (what we are building)</h2>
+  <div class="card locked">
+    <p><b>Cognitive job:</b> Give Instant Mechanic's operations team one screen that answers &ldquo;what is happening right now, and what needs a human?&rdquo; across vehicle-service bookings, mechanics, customers and revenue &mdash; and let an operator request/dispatch a mechanic against a booking. This is a <b>monitoring and dispatch surface over operational data</b>, not a customer-facing product and not an automation.</p>
+    <p><b>Inputs:</b> Operational Postgres (Supabase): bookings, mechanics, customers, payments. Operator filters (date range, status, region). Operator dispatch actions. &nbsp;→&nbsp; <b>Outputs:</b> Dashboard views (booking queue, mechanic availability &amp; load, customer records, revenue rollups) + assignment writes back to bookings + an audit row per operator action.</p>
+    <p><b>Autonomy level:</b> <b>Level 1 &mdash; assistive.</b> The system computes and displays; it never changes booking state on its own. &nbsp;|&nbsp; <b>Human-in-the-loop points:</b> Every write. Requesting/assigning a mechanic, cancelling, and any refund or price override are explicit operator clicks with confirmation.</p>
+    <p><b>Failure tolerance:</b> <b>Reads:</b> degrade visibly &mdash; a failed panel shows an error state and a data-as-of timestamp, never a blank panel and never a silently stale number. Revenue is never approximated. <b>Writes:</b> zero tolerance for duplicates &mdash; a double-clicked dispatch must assign once (idempotent on booking+mechanic). &nbsp;|&nbsp; <b>Trust boundary:</b> Internal staff only, authenticated; no anonymous access. Behind the login sits customer PII (name, address, phone, vehicle) and revenue data, so authn is a hard gate and ops-vs-admin role separation governs refunds and exports. The database is hosted Supabase reached <b>over the public internet</b> &mdash; the connection string is a secret and the DB is not on a private network.</p>
+    <p class="note">Filled during Genesis step G0 (Cognitive Design) via <code>agentic-swe-master</code>.</p>
+  </div>
+
+  <!-- ───────────── DEFINITION OF DONE ───────────── -->
+  <h2>2 · Definition of Done (binary gates — checked by the VERIFIER, not the maker)</h2>
+  <div class="card">
+    <div class="gate"><span class="box"></span><span class="label">Dependency direction inward, zero cycles <span class="note">(modular-architecture gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">Every outbound call has a timeout / circuit-breaker <span class="note">(production-readiness gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">Booking lifecycle drawn as an explicit state machine; every status transition is enumerated and validated <span class="note">(P3 Backend gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">Every operator write is idempotent &mdash; retrying it has no side effect it didn't have on first execution <span class="note">(P12 Reliability gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">Prisma schema changes are backward-compatible for at least one full deployment cycle <span class="note">(P14 Data gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">Threat model written with specific adversary categories (unauthenticated internet, ex-staff with a stale session, over-scoped ops account) <span class="note">(P11 Security gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">RBAC implemented &mdash; ops vs admin; refunds/exports are admin-only and enforced server-side, not just hidden in the UI <span class="note">(P11 Security gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">Audit trail is append-only: every dispatch/cancel/refund writes an immutable row with actor, target and timestamp <span class="note">(P11 Security + P15 Governance gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">No customer PII in logs or error payloads <span class="note">(P11 Security gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label">HITL touchpoints mapped &mdash; no dashboard control mutates booking state without an explicit confirm <span class="note">(P2 Frontend gate)</span></span></div>
+    <div class="gate"><span class="box"></span><span class="label"><code>(cd backend &amp;&amp; npx tsc --noEmit) &amp;&amp; (cd frontend &amp;&amp; npx tsc --noEmit)</code> clean AND <code>cd backend &amp;&amp; node --test</code> green in CI</span></div>
+    <div class="gate"><span class="box"></span><span class="label">One <code>verify</code> pass by a <b>separate</b> agent/model (L4)</span></div>
+    <div class="gate"><span class="box"></span><span class="label">No <code>context-graph.json</code> invariant violated by the change</span></div>
+    <p class="note">A milestone is DONE only when every box above is checked by the verifier. Pull each
+       gate from the relevant <code>agentic-swe-master</code> phase gate.</p>
+  </div>
+
+  <!-- ───────────── IMPLEMENTATION PLAN ───────────── -->
+  <h2>3 · Implementation Plan (the work, sliced into milestones)</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>#</th><th>Milestone</th><th>Phase</th><th>Demo command (proves it works)</th><th>Loops</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>M1</td><td>Green baseline + data model</td><td>P1 Architecture / P14 Data</td><td><code>cd backend &amp;&amp; npx prisma validate &amp;&amp; npx tsc --noEmit &amp;&amp; node --test</code></td><td>L1, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M2</td><td>Query layer + revenue rollup</td><td>P3 Backend / P14 Data</td><td><code>cd backend &amp;&amp; node --test src/db/</code></td><td>L1, L3, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M3</td><td>Dashboard read UI</td><td>P2 Frontend</td><td><code>npm --prefix frontend run demo:m3</code></td><td>L1, L2, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M4</td><td>Staff auth gate</td><td>P11 Security</td><td><code>npm --prefix frontend run demo:m4</code></td><td>L1, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M5</td><td>Request-a-mechanic dispatch (idempotent)</td><td>P3 Backend / P12 Reliability</td><td><code>cd backend &amp;&amp; node --test src/dispatch/</code></td><td>L1, L2, L4</td><td><span class="pill">todo</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note">Total token budget = (n milestones × 50000). Update <span class="pill wip">wip</span> /
+       <span class="pill ok">done</span> as loops complete. This table is mirrored in <code>PLAN.md</code> for the agent to parse.</p>
+  </div>
+
+  <!-- ───────────── SKILL LOADING ───────────── -->
+  <h2>4 · Skill Loading Per Milestone</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Milestone</th><th>Always-on canon</th><th>Milestone-specific skills</th></tr></thead>
+      <tbody>
+        <tr><td>M1</td><td>agentic-swe-master, coding-orchestrator, modular-architecture</td><td>tdd, data-systems-engineering</td></tr>
+        <tr><td>M2</td><td>(canon)</td><td>tdd, production-readiness, llmops-ai-agents</td></tr>
+        <tr><td>M3</td><td>(canon)</td><td>tdd, security-engineering, distributed-systems</td></tr>
+        <tr><td>frontend M*</td><td>(canon)</td><td><b>design-system skill (MANDATORY)</b>, tdd, qa</td></tr>
+      </tbody>
+    </table>
+    <p class="note">If a milestone needs a skill not listed, G1 logs "skill X needed but not on the menu — loaded ad hoc" so the choice is visible.</p>
+  </div>
+
+</div>
+</body>
+</html>

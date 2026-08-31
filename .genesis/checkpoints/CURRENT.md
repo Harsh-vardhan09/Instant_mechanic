@@ -1,0 +1,13 @@
+# CURRENT
+- active_loop: NONE
+- target: M1 — Green baseline + data model
+- iteration: 0
+- last_gate: —
+- last_action: genesis ritual G0–G6 complete; spine filled (cognitive job, 4 invariants, wiki pointers, DoD gates, 5 milestones)
+- next_action: run G0 EXISTENCE PRE-FLIGHT on M1, then L1 BUILD
+- model: claude-haiku-4-5
+- tokens_used: 0
+- tokens_budget: 50000
+- skills_loaded: []
+- known_red: `cd backend && npx tsc --noEmit` exits 1 (prisma 8.0.0-rc.12 vs @prisma/client 7.10.0 — `prisma/config` exports no `defineConfig`). M1 fixes this.
+- open_decision: PLAN.md G0.5 chose Approach A (Next.js full-stack). Confirm with user before M2.
