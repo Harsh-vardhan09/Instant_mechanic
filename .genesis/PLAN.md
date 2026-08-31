@@ -36,13 +36,13 @@ Stand up an off-the-shelf BI tool against the existing database; build only the 
 - Weaknesses: "request a mechanic" is a write with business rules and cannot live in a BI tool, so a
   custom surface is needed anyway; row-level access control over customer PII is coarse.
 
-### Chosen: **Approach A** — one deployable, one auth session, and the read-heavy dashboard is precisely the RSC workload; `backend/` is parked rather than deleted so Approach B remains one refactor away the day a second consumer appears.
+### Chosen: **Approach B** — split Express REST+WS API and Next.js client
+The assignment requires the Express backend deployed separately on AWS with the Next.js frontend on
+Vercel, so the process boundary is a hard requirement, not a trade-off to optimise away. Socket.io also
+needs a long-lived server that Vercel’s serverless functions do not provide.
 
-> ⚠️ **Confirm before M2.** This parks `backend/src/` (currently empty, so nothing is lost) and makes
-> `frontend/` the deployable. `backend/prisma/` still owns the schema and migrations. If a mobile app or
-> partner API is already on the roadmap, say so and we switch to Approach B before M2 — after M2 the
-> refactor gets expensive. Approach C is still the honest recommendation for the *monitoring* half if
-> nobody has committed to building custom charts.
+> Superseded: an earlier pass chose Approach A (Next.js full-stack). That is wrong for this project —
+> it assumed one deployable. Approach A is retained above only as a recorded alternative.
 
 ---
 

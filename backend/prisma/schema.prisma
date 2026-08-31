@@ -1,0 +1,11 @@
+// Data model lands in a later prompt. Generator + datasource only, so `prisma validate` has a target.
+// Prisma 7: the connection URL lives in prisma.config.ts, NOT here. The runtime client gets a
+// driver adapter (@prisma/adapter-pg) instead of a `url` in this block.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
