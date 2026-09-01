@@ -1,0 +1,50 @@
+# Local development override: adds a Postgres container and makes the API wait for it.
+#
+#   docker compose -f compose.yaml -f compose.local.yaml up -d
+#
+# Use this only when you want a database on your machine — offline work, throwaway test data,
+# or to avoid spending Supabase connections while developing. If you are pointing at Supabase,
+# do not use this file; plain `docker compose up -d` is what you want.
+#
+# The DATABASE_URL below overrides whatever is in .env, so the API talks to this
+# container rather than the cloud.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-instant_mechanic}
+    ports:
+      # localhost-only, so `npm run db:studio` and psql work from the host without exposing
+      # the database to the network.
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready, not a TCP probe: the port accepts connections several seconds before the
+      # server will answer queries, and the API would race its first migration.
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-instant_mechanic}',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    depends_on:
+      db:
+        # Waits for the healthcheck to pass, not merely for the container to exist.
+        condition: service_healthy
+    environment:
+      # Point at the container by service name. No pooler here, so the Prisma-engine tuning
+      # params the Supabase URL carries are unnecessary.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-instant_mechanic}
+
+volumes:
+  db-data:

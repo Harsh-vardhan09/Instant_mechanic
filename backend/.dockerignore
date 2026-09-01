@@ -1,34 +1,41 @@
-# Include any files or directories that you don't want to be copied to your
-# container here (e.g., local build artifacts, temporary files, etc.).
-#
-# For more help, visit the .dockerignore file reference guide at
-# https://docs.docker.com/go/build-context-dockerignore/
+# Keep the build context small and keep secrets out of the image.
+# Everything the runtime needs is produced by the build stage, not copied from the host.
 
-**/.classpath
-**/.dockerignore
-**/.env
-**/.git
-**/.gitignore
-**/.project
-**/.settings
-**/.toolstarget
-**/.vs
-**/.vscode
-**/.next
-**/.cache
-**/*.*proj.user
-**/*.dbmdl
-**/*.jfm
-**/charts
-**/docker-compose*
-**/compose.y*ml
-**/Dockerfile*
+# Host node_modules would shadow the ones installed for the target platform.
+node_modules
 **/node_modules
-**/npm-debug.log
-**/obj
-**/secrets.dev.yaml
-**/values.dev.yaml
-**/build
-**/dist
-LICENSE
+
+# Secrets. The image must never contain a real .env — values come from the environment at
+# run time. .env.example is deliberately NOT excluded; it documents the contract.
+.env
+.env.*
+!.env.example
+
+# Build output — the image compiles its own. Copying a stale host dist/ is how an image ends
+# up running code that does not match its source.
+dist
+build
+*.tsbuildinfo
+
+# Not needed at runtime
+.git
+.gitignore
+tests
+**/*.test.ts
+**/*.spec.ts
+coverage
+.vscode
+.idea
+*.log
+npm-debug.log*
+
+# Docker's own files
+Dockerfile*
+.dockerignore
+compose*.y*ml
+docker-compose*
+
+# Docs that do not affect the build. openapi.yaml is NOT here — the API serves it at /api/docs.
 README.md
+README.Docker.md
+DEPLOYMENT.md

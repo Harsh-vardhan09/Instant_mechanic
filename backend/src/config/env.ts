@@ -4,8 +4,6 @@ import { z } from 'zod';
 const envSchema = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
 
-  DIRECT_URL: z.url({ protocol: /^postgres(ql)?$/ }),
-
   JWT_SECRET: z.string().min(32, 'must be at least 32 characters'),
 
   PORT: z.coerce.number().int().positive().max(65535).default(8000),

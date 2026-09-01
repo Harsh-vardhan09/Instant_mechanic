@@ -1,15 +1,29 @@
 services:
-  server:
+  api:
     build:
       context: .
+      target: runtime
+    restart: unless-stopped
     environment:
-      NODE_ENV: production
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 8000
+ 
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required — copy .env.example to .env}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required — copy .env.example to .env}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
     ports:
-      - 8000:8000
-
-# volumes:
-#   db-data:
-# secrets:
-#   db-password:
-#     file: db/password.txt
-
+      - '127.0.0.1:8000:8000'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    # Time to drain in-flight requests before Docker escalates SIGTERM to SIGKILL.
+    stop_grace_period: 30s

@@ -1,0 +1,39 @@
+# Caddy reverse proxy for the instant-mechanic API.
+#
+# This exists for one reason: the Vercel frontend is served over HTTPS, and a browser refuses
+# every request and every WebSocket from an HTTPS page to a plain-HTTP origin. Without TLS
+# the dashboard loads and then does nothing at all.
+#
+# Caddy obtains and renews a Let's Encrypt certificate on its own — there is no certbot step
+# and no renewal cron to forget. It needs ports 80 and 443 reachable from the internet and a
+# hostname that resolves to this machine.
+#
+# Replace api.example.com with your hostname, and the email with a real one (Let's Encrypt
+# uses it for expiry warnings).
+
+{
+	email you@example.com
+}
+
+api.example.com {
+	# The API listens on localhost only; Caddy is the only thing that can reach it.
+	reverse_proxy 127.0.0.1:8000 {
+		# Without these the API sees Caddy's IP as the client, and the rate limiter would
+		# bucket every operator together — five bad logins anywhere would lock out everyone.
+		# `app.set('trust proxy', 1)` in app.ts is the other half of this.
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# socket.io upgrades an ordinary HTTP request to a WebSocket. Caddy v2 proxies that
+	# transparently, so no special websocket block is needed — this is only here to say so
+	# explicitly, because the usual instinct is to add one.
+
+	encode gzip zstd
+
+	log {
+		output file /var/log/caddy/api.log
+		format json
+	}
+}
